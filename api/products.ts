@@ -9,7 +9,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     switch (method) {
       case 'GET':
         const { rows } = await sql`
-          SELECT * FROM products ORDER BY id DESC
+          SELECT * FROM products ORDER BY COALESCE(created_at, '1970-01-01'::timestamp) DESC, id DESC
         `;
         // Transform database rows to match frontend format
         const products = rows.map((row: any) => ({

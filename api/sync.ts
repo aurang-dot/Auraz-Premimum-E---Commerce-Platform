@@ -32,9 +32,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           WHERE created_at > ${sinceDate.toISOString()}
         `;
 
-        // For products, we'll just check if there are any products (simpler approach)
+        // Check for recent products
         const { rows: recentProducts } = await sql`
-          SELECT COUNT(*) as count FROM products
+          SELECT COUNT(*) as count FROM products 
+          WHERE COALESCE(created_at, '1970-01-01'::timestamp) > ${sinceDate.toISOString()}
         `;
 
         const hasUpdates =

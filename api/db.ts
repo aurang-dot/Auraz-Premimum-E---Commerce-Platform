@@ -60,7 +60,8 @@ export async function initDatabase() {
         is_electronics BOOLEAN DEFAULT false,
         variants JSONB DEFAULT '[]'::jsonb,
         specifications JSONB DEFAULT '{}'::jsonb,
-        seller JSONB DEFAULT '{}'::jsonb
+        seller JSONB DEFAULT '{}'::jsonb,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `;
 
