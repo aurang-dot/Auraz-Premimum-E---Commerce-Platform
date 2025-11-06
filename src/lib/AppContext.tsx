@@ -3,6 +3,7 @@ import {
   useContext,
   useState,
   useEffect,
+  useRef,
   ReactNode,
 } from "react";
 import {
@@ -12,6 +13,7 @@ import {
   heroSlides,
 } from "./mockData";
 import { toast } from "sonner";
+import { authApi, usersApi, productsApi, ordersApi, syncApi } from "./apiClient";
 
 export interface Address {
   id: string;
@@ -259,9 +261,9 @@ interface AppContextType {
 
   // Admin - Users
   users: User[];
-  approveUser: (userId: string) => void;
-  rejectUser: (userId: string) => void;
-  deleteUser: (userId: string) => void;
+  approveUser: (userId: string) => Promise<void>;
+  rejectUser: (userId: string) => Promise<void>;
+  deleteUser: (userId: string) => Promise<void>;
 
   // Admin - Products
   products: Product[];
@@ -277,8 +279,8 @@ interface AppContextType {
   updateOrderStatus: (
     orderId: string,
     status: Order["status"],
-  ) => void;
-  placeOrder: (order: Omit<Order, "id" | "createdAt">) => void;
+  ) => Promise<void>;
+  placeOrder: (order: Omit<Order, "id" | "createdAt">) => Promise<void>;
   cancelOrder: (orderId: string) => void;
   deleteOrder: (orderId: string) => void;
 
@@ -570,11 +572,15 @@ export function AppProvider({
       freeShippingThreshold: 5000,
     });
 
-  // Track if initial load from localStorage is complete
+  // Track if initial load from database is complete
   const [isInitialized, setIsInitialized] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const lastSyncRef = useRef<number>(0);
+  const syncIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Load initial data from localStorage ONCE on mount
+  // Load initial data from database ONCE on mount
   useEffect(() => {
+    // Load user session from localStorage (for client-side persistence)
     const loadedUser = getFromLocalStorage<User | null>(
       "auraz_currentUser",
       null,
@@ -591,10 +597,41 @@ export function AppProvider({
       "auraz_wishlist",
       [],
     );
-    const loadedUsers = getFromLocalStorage<User[]>(
-      "auraz_users",
-      [],
-    );
+
+    // Load data from database
+    const loadDataFromDatabase = async () => {
+      try {
+        setIsLoading(true);
+        
+        // Load users, products, orders from API
+        const [usersData, productsData, ordersData] = await Promise.all([
+          usersApi.getAll().catch(() => []),
+          productsApi.getAll().catch(() => mockProducts),
+          ordersApi.getAll().catch(() => []),
+        ]);
+
+        setUsers(usersData);
+        setProducts(productsData.length > 0 ? productsData : mockProducts);
+        setOrders(ordersData);
+
+        // Get last sync timestamp
+        lastSyncRef.current = await syncApi.getLastSync().catch(() => Date.now());
+        
+        setIsLoading(false);
+      } catch (error) {
+        console.error('Error loading data from database:', error);
+        // Fallback to localStorage if API fails
+        const loadedUsers = getFromLocalStorage<User[]>("auraz_users", []);
+        const loadedProducts = getFromLocalStorage<Product[]>("auraz_products", mockProducts);
+        const loadedOrders = getFromLocalStorage<Order[]>("auraz_orders", []);
+        setUsers(loadedUsers);
+        setProducts(loadedProducts);
+        setOrders(loadedOrders);
+        setIsLoading(false);
+      }
+    };
+
+    loadDataFromDatabase();
 
     // Convert heroSlides to CarouselSlides format
     const defaultCarouselSlides: CarouselSlide[] =
@@ -606,16 +643,6 @@ export function AppProvider({
         buttonText: slide.cta,
         buttonLink: slide.link,
       }));
-
-    // Use mock products as default if localStorage is empty
-    const loadedProducts = getFromLocalStorage<Product[]>(
-      "auraz_products",
-      mockProducts,
-    );
-    const loadedOrders = getFromLocalStorage<Order[]>(
-      "auraz_orders",
-      [],
-    );
     const loadedVerifications = getFromLocalStorage<
       PaymentVerification[]
     >("auraz_paymentVerifications", []);
@@ -708,13 +735,11 @@ export function AppProvider({
       Conversation[]
     >("auraz_conversations", []);
 
+    // Set client-side state (cart, wishlist, current user)
     if (loadedUser) setCurrentUser(loadedUser);
     if (loadedIsAdmin) setIsAdmin(loadedIsAdmin);
     if (loadedCart.length > 0) setCart(loadedCart);
     if (loadedWishlist.length > 0) setWishlist(loadedWishlist);
-    setUsers(loadedUsers);
-    setProducts(loadedProducts);
-    if (loadedOrders.length > 0) setOrders(loadedOrders);
     if (loadedVerifications.length > 0)
       setPaymentVerifications(loadedVerifications);
     setCarouselSlides(loadedSlides);
@@ -731,6 +756,42 @@ export function AppProvider({
 
     setIsInitialized(true);
   }, []); // Run only once on mount
+
+  // Real-time sync: Poll for updates every 5 seconds
+  useEffect(() => {
+    if (!isInitialized || isLoading) return;
+
+    const syncData = async () => {
+      try {
+        const updates = await syncApi.checkUpdates(lastSyncRef.current);
+        if (updates.hasUpdates) {
+          console.log('🔄 Real-time update detected, refreshing data...');
+          // Reload data from database
+          const [usersData, productsData, ordersData] = await Promise.all([
+            usersApi.getAll().catch(() => users),
+            productsApi.getAll().catch(() => products),
+            ordersApi.getAll().catch(() => orders),
+          ]);
+
+          setUsers(usersData);
+          setProducts(productsData.length > 0 ? productsData : products);
+          setOrders(ordersData);
+          lastSyncRef.current = updates.timestamp || Date.now();
+        }
+      } catch (error) {
+        console.error('Sync error:', error);
+      }
+    };
+
+    // Sync every 5 seconds for real-time updates
+    syncIntervalRef.current = setInterval(syncData, 5000);
+
+    return () => {
+      if (syncIntervalRef.current) {
+        clearInterval(syncIntervalRef.current);
+      }
+    };
+  }, [isInitialized, isLoading, users, products, orders]);
 
   // Sync state to localStorage whenever it changes (AFTER initial load)
   useEffect(() => {
@@ -871,53 +932,29 @@ export function AppProvider({
       );
   }, []);
 
-  // Auth Functions
+  // Auth Functions - Now using API
   const login = async (
     email: string,
     password: string,
   ): Promise<boolean> => {
-    // Admin login
-    if (email === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
-      setIsAdmin(true);
-      setCurrentUser({
-        id: "admin",
-        name: "Admin",
-        email: ADMIN_EMAIL,
-        phone: "",
-        password: ADMIN_PASSWORD,
-        status: "approved",
-        createdAt: "2025-01-01",
-        addresses: [],
-        paymentMethods: [],
-        usedVouchers: [],
-      });
-      toast.success("Welcome Admin!");
-      return true;
+    try {
+      const result = await authApi.login(email, password);
+      
+      if (result.success) {
+        setCurrentUser(result.user);
+        setIsAdmin(result.isAdmin || false);
+        saveToLocalStorage("auraz_currentUser", result.user);
+        saveToLocalStorage("auraz_isAdmin", result.isAdmin || false);
+        toast.success(result.isAdmin ? "Welcome Admin!" : `Welcome back, ${result.user.name}!`);
+        return true;
+      } else {
+        toast.error(result.error || "Login failed");
+        return false;
+      }
+    } catch (error: any) {
+      toast.error(error.message || "Login failed");
+      return false;
     }
-
-    // User login
-    const user = users.find((u) => u.email === email);
-    if (user) {
-      if (user.password !== password) {
-        toast.error("Invalid password");
-        return false;
-      }
-      if (user.status === "pending") {
-        toast.error("Your account is pending approval");
-        return false;
-      }
-      if (user.status === "rejected") {
-        toast.error("Your account has been rejected");
-        return false;
-      }
-      setCurrentUser(user);
-      setIsAdmin(false);
-      toast.success(`Welcome back, ${user.name}!`);
-      return true;
-    }
-
-    toast.error("Invalid email or password");
-    return false;
   };
 
   const logout = () => {
@@ -926,7 +963,7 @@ export function AppProvider({
     toast.success("Logged out successfully");
   };
 
-  const register = (
+  const register = async (
     userData: Omit<
       User,
       | "id"
@@ -937,30 +974,20 @@ export function AppProvider({
       | "usedVouchers"
     >,
   ) => {
-    const existingUser = users.find(
-      (u) => u.email === userData.email,
-    );
-    if (existingUser) {
-      toast.error("Email already registered");
-      return;
-    }
+    try {
+      const result = await authApi.register(userData);
 
-    const newUser: User = {
-      ...userData,
-      id:
-        Date.now().toString() +
-        "-" +
-        Math.random().toString(36).substr(2, 9),
-      status: "pending",
-      createdAt: new Date().toISOString().split("T")[0],
-      addresses: [],
-      paymentMethods: [],
-      usedVouchers: [],
-    };
-    setUsers((prev) => [...prev, newUser]);
-    toast.success(
-      "Registration submitted! Please wait for admin approval.",
-    );
+      if (result.success) {
+        // Refresh users list to include new user
+        const updatedUsers = await usersApi.getAll();
+        setUsers(updatedUsers);
+        toast.success(result.message || "Registration submitted! Please wait for admin approval.");
+      } else {
+        toast.error(result.error || "Registration failed");
+      }
+    } catch (error: any) {
+      toast.error(error.message || "Registration failed");
+    }
   };
 
   const updateUserProfile = (
@@ -1275,47 +1302,60 @@ export function AppProvider({
     return wishlist.some((p) => p.id === productId);
   };
 
-  // Admin - User Management
-  const approveUser = (userId: string) => {
-    setUsers((prev) =>
-      prev.map((user) =>
-        user.id === userId
-          ? { ...user, status: "approved" as const }
-          : user,
-      ),
-    );
-    toast.success("User approved");
+  // Admin - User Management - Now using API
+  const approveUser = async (userId: string) => {
+    try {
+      await usersApi.update(userId, { status: 'approved' });
+      // Refresh users list
+      const updatedUsers = await usersApi.getAll();
+      setUsers(updatedUsers);
+      toast.success("User approved");
+    } catch (error: any) {
+      toast.error(error.message || "Failed to approve user");
+    }
   };
 
-  const rejectUser = (userId: string) => {
-    setUsers((prev) =>
-      prev.map((user) =>
-        user.id === userId
-          ? { ...user, status: "rejected" as const }
-          : user,
-      ),
-    );
-    toast.success("User rejected");
+  const rejectUser = async (userId: string) => {
+    try {
+      await usersApi.update(userId, { status: 'rejected' });
+      // Refresh users list
+      const updatedUsers = await usersApi.getAll();
+      setUsers(updatedUsers);
+      toast.success("User rejected");
+    } catch (error: any) {
+      toast.error(error.message || "Failed to reject user");
+    }
   };
 
-  const deleteUser = (userId: string) => {
-    setUsers((prev) =>
-      prev.filter((user) => user.id !== userId),
-    );
-    toast.success("User deleted");
+  const deleteUser = async (userId: string) => {
+    try {
+      await usersApi.delete(userId);
+      // Refresh users list
+      const updatedUsers = await usersApi.getAll();
+      setUsers(updatedUsers);
+      toast.success("User deleted");
+    } catch (error: any) {
+      toast.error(error.message || "Failed to delete user");
+    }
   };
 
-  // Admin - Product Management
-  const addProduct = (productData: Omit<Product, "id">) => {
-    const newProduct: Product = {
-      ...productData,
-      id:
-        Date.now().toString() +
-        "-" +
-        Math.random().toString(36).substr(2, 9),
-    };
-    setProducts((prev) => [...prev, newProduct]);
-    toast.success("Product added");
+  // Admin - Product Management - Now using API
+  const addProduct = async (productData: Omit<Product, "id">) => {
+    try {
+      const newProduct: Product = {
+        ...productData,
+        id: `product-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      };
+      
+      await productsApi.create(newProduct);
+      
+      // Refresh products list
+      const updatedProducts = await productsApi.getAll();
+      setProducts(updatedProducts.length > 0 ? updatedProducts : [newProduct]);
+      toast.success("Product added");
+    } catch (error: any) {
+      toast.error(error.message || "Failed to add product");
+    }
   };
 
   const updateProduct = (
@@ -1339,20 +1379,23 @@ export function AppProvider({
     toast.success("Product deleted");
   };
 
-  // Admin - Order Management
-  const placeOrder = (
+  // Admin - Order Management - Now using API
+  const placeOrder = async (
     orderData: Omit<Order, "id" | "createdAt">,
   ) => {
-    const newOrder: Order = {
-      ...orderData,
-      id:
-        Date.now().toString() +
-        "-" +
-        Math.random().toString(36).substr(2, 9),
-      createdAt: new Date().toISOString(),
-    };
-    setOrders((prev) => [...prev, newOrder]);
-    clearCart();
+    try {
+      const newOrder: Order = {
+        ...orderData,
+        id: `order-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        createdAt: new Date().toISOString(),
+      };
+      
+      await ordersApi.create(newOrder);
+      
+      // Refresh orders list
+      const updatedOrders = await ordersApi.getAll();
+      setOrders(updatedOrders);
+      clearCart();
 
     // Send notification to user
     addNotification({
@@ -1376,15 +1419,15 @@ export function AppProvider({
     toast.success("Order placed successfully!");
   };
 
-  const updateOrderStatus = (
+  const updateOrderStatus = async (
     orderId: string,
     status: Order["status"],
   ) => {
-    setOrders((prev) =>
-      prev.map((order) =>
-        order.id === orderId ? { ...order, status } : order,
-      ),
-    );
+    try {
+      await ordersApi.update(orderId, { status });
+      // Refresh orders list
+      const updatedOrders = await ordersApi.getAll();
+      setOrders(updatedOrders);
 
     // Send notification to user
     const order = orders.find((o) => o.id === orderId);

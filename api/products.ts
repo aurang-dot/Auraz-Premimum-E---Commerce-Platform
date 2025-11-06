@@ -9,9 +9,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     switch (method) {
       case 'GET':
         const { rows } = await sql`
-          SELECT * FROM products ORDER BY created_at DESC
+          SELECT * FROM products ORDER BY id DESC
         `;
-        return res.status(200).json({ success: true, data: rows });
+        // Transform database rows to match frontend format
+        const products = rows.map((row: any) => ({
+          id: row.id,
+          name: row.name,
+          description: row.description || '',
+          price: parseFloat(row.price || 0),
+          originalPrice: row.original_price ? parseFloat(row.original_price) : undefined,
+          image: row.image,
+          images: row.images || [],
+          category: row.category || '',
+          brand: row.brand || '',
+          stock: parseInt(row.stock || 0),
+          rating: parseFloat(row.rating || 0),
+          reviewCount: parseInt(row.review_count || 0),
+          trending: row.trending || false,
+          newArrival: row.new_arrival || false,
+          isDeal: row.is_deal || false,
+          isFestive: row.is_festive || false,
+          isElectronics: row.is_electronics || false,
+          variants: row.variants || [],
+          specifications: row.specifications || {},
+          seller: row.seller || {},
+        }));
+        return res.status(200).json({ success: true, data: products });
 
       case 'POST':
         const { id, name, description, price, originalPrice, image, images, category, brand, stock, rating, reviewCount, trending, newArrival, isDeal, isFestive, isElectronics, variants, specifications, seller } = body;
